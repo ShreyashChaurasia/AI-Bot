@@ -1,0 +1,124 @@
+CRITICAL MASS BOT STRATEGY DOCUMENT
+
+Team Bot File: critical_mass_bot/teamname_bot.py
+Reference Implementation: critical_mass_bot/redbits_bot.py
+Board Size: 12 x 8
+
+1) GOAL
+
+The bot is designed to maximize win rate in Chain Reaction while staying strictly within the 1 second move limit. The approach prioritizes dynamic game-state reasoning over hard-coded opening lines.
+
+2) CORE IDEA
+
+The bot uses a time-bounded game-tree search with tactical ordering and a dynamic evaluation function.
+
+- Search algorithm: iterative deepening negamax (minimax variant) with alpha-beta pruning.
+- State update model: exact chain-reaction simulation with queue-driven explosion propagation.
+- Decision policy: return the best fully-searched move before deadline.
+
+This gives a strong balance between tactical accuracy and speed.
+
+3) STATE REPRESENTATION
+
+Incoming engine state is converted into compact arrays for speed:
+
+- owners[idx]: cell owner (0, 1, or -1 for empty)
+- counts[idx]: orb count in cell
+- idx = row * 8 + col
+
+The bot precomputes:
+
+- CAPACITY for every cell (corner=2, edge=3, interior=4)
+- NEIGHBORS for every cell
+- POSITION_WEIGHT for stable positions (corners/edges preferred)
+
+These precomputations reduce repeated work at runtime.
+
+4) MOVE SIMULATION
+
+A candidate move is applied as follows:
+
+1. Place one orb in selected legal cell.
+2. If orb count reaches critical mass, enqueue the cell.
+3. While queue is non-empty:
+   - explode cell
+   - distribute orbs to neighbors
+   - convert neighbor ownership to exploding player
+   - enqueue neighbors that become critical
+
+This accurately captures long cascade effects and chain reactions.
+
+5) SEARCH METHOD
+
+The bot performs iterative deepening over depth = 1, 2, 3, ... until time expires.
+
+At each depth:
+
+- Negamax recursion explores both players.
+- Alpha-beta pruning cuts inferior branches.
+- Terminal elimination checks return large win/loss scores.
+- If timeout occurs, the last completed depth result is retained.
+
+Why iterative deepening:
+
+- Always has a safe fallback move.
+- Improves move quality as time allows.
+- Naturally supports strict per-move deadlines.
+
+6) MOVE ORDERING (PRUNING QUALITY BOOST)
+
+Before exploring children, moves are sorted by tactical priority:
+
+- Immediate explosion potential.
+- Explosions affecting opponent cells.
+- Pressure on opponent near-critical cells.
+- Supportive links to own near-critical groups.
+- Positional stability bonuses (corner/edge).
+- Penalty for stepping into obvious counter-explosion risk.
+
+Better ordering increases alpha-beta cutoffs, so deeper tactical search is possible within the same time budget.
+
+7) EVALUATION FUNCTION (DYNAMIC FEATURES)
+
+When search reaches depth limit (or non-terminal cutoff), board is scored using weighted features:
+
+- Cell control difference
+- Orb count difference
+- Critical pressure (count of near-critical owned cells)
+- Positional strength (corner/edge occupancy)
+- Vulnerability (critical cells exposed to enemy trigger chains)
+- Mobility (number of legal move options)
+
+The evaluation is not a fixed script of board patterns; it reacts to the current tactical structure each turn.
+
+8) TACTICAL SHORTCUTS
+
+Before deeper search, the bot checks for immediate forced wins after one move and plays them instantly.
+
+This prevents wasting budget when a direct elimination is available.
+
+9) TIME MANAGEMENT AND CONSTRAINT COMPLIANCE
+
+The bot uses adaptive per-move budgeting based on game phase and branching:
+
+- Early game: smaller budget
+- Mid game: moderate budget
+- Dense tactical game: larger budget
+- Typical range: about 0.05s to 0.24s internal budget
+
+Competition constraints satisfied:
+
+- Python implementation
+- No extra threads
+- No intentional turn forfeits
+- Valid move returned from legal set
+- Designed to remain safely below 1 second deadline
+
+10) WHY THIS APPROACH IS COMPETITIVE
+
+- Handles chain reactions exactly rather than approximating them.
+- Uses search + pruning + ordering to focus compute on high-impact branches.
+- Uses dynamic board features instead of brittle hard-coded sequences.
+- Maintains strict timing reliability while preserving tactical depth.
+
+This makes the bot robust against a wide range of opponent styles in round-robin and knockout formats.

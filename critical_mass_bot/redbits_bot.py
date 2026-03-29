@@ -1,409 +1,425 @@
-import numpy as np
-import time
 from collections import deque
+import time
 
 ROWS = 12
 COLS = 8
-TOTAL_CELLS = ROWS * COLS
-TIME_LIMIT = 0.85
-MAX_SEARCH_DEPTH = 30
+N_CELLS = ROWS * COLS
+BASE_TIME_LIMIT = 0.18
+MAX_DEPTH = 12
+WIN_SCORE = 10_000_000.0
 
-CAPACITY = np.zeros((ROWS, COLS), dtype=np.int8)
-NEIGHBORS = [[[] for _ in range(COLS)] for _ in range(ROWS)]
+CAPACITY = [0] * N_CELLS
+NEIGHBORS = [[] for _ in range(N_CELLS)]
+POSITION_WEIGHT = [0.0] * N_CELLS
 
-for _r in range(ROWS):
-    for _c in range(COLS):
-        is_top = _r == 0
-        is_bottom = _r == ROWS - 1
-        is_left = _c == 0
-        is_right = _c == COLS - 1
-        if (is_top and is_left) or (is_top and is_right) or \
-           (is_bottom and is_left) or (is_bottom and is_right):
-            CAPACITY[_r][_c] = 2
+for r in range(ROWS):
+    for c in range(COLS):
+        idx = r * COLS + c
+
+        is_top = r == 0
+        is_bottom = r == ROWS - 1
+        is_left = c == 0
+        is_right = c == COLS - 1
+
+        if (is_top and is_left) or (is_top and is_right) or (is_bottom and is_left) or (is_bottom and is_right):
+            cap = 2
+            pos_w = 2.6
         elif is_top or is_bottom or is_left or is_right:
-            CAPACITY[_r][_c] = 3
+            cap = 3
+            pos_w = 1.3
         else:
-            CAPACITY[_r][_c] = 4
+            cap = 4
+            pos_w = 0.2
+
+        CAPACITY[idx] = cap
+        POSITION_WEIGHT[idx] = pos_w
 
         nbrs = []
-        if _r - 1 >= 0:
-            nbrs.append((_r - 1, _c))
-        if _r + 1 < ROWS:
-            nbrs.append((_r + 1, _c))
-        if _c - 1 >= 0:
-            nbrs.append((_r, _c - 1))
-        if _c + 1 < COLS:
-            nbrs.append((_r, _c + 1))
-        NEIGHBORS[_r][_c] = nbrs
-
-CORNER_EDGE_BONUS = np.zeros((ROWS, COLS), dtype=np.float32)
-for _r in range(ROWS):
-    for _c in range(COLS):
-        cap = CAPACITY[_r][_c]
-        if cap == 2:
-            CORNER_EDGE_BONUS[_r][_c] = 3.0
-        elif cap == 3:
-            CORNER_EDGE_BONUS[_r][_c] = 1.5
-
-INF = 1e9
+        if r > 0:
+            nbrs.append((r - 1) * COLS + c)
+        if r < ROWS - 1:
+            nbrs.append((r + 1) * COLS + c)
+        if c > 0:
+            nbrs.append(r * COLS + (c - 1))
+        if c < COLS - 1:
+            nbrs.append(r * COLS + (c + 1))
+        NEIGHBORS[idx] = nbrs
 
 
-def state_to_grids(state):
-    owner_grid = np.full((ROWS, COLS), -1, dtype=np.int8)
-    count_grid = np.zeros((ROWS, COLS), dtype=np.int8)
-    for row in range(ROWS):
-        for col in range(COLS):
-            owner, orb_count = state[row][col]
-            if owner is not None:
-                owner_grid[row][col] = owner
-                count_grid[row][col] = orb_count
-    return owner_grid, count_grid
+def move_to_idx(move):
+    return move[0] * COLS + move[1]
 
 
-def count_cells_per_player(owner_grid, count_grid):
+def idx_to_move(idx):
+    return (idx // COLS, idx % COLS)
+
+
+def state_to_arrays(state):
+    owners = [-1] * N_CELLS
+    counts = [0] * N_CELLS
+    total_orbs = 0
+
+    idx = 0
+    for r in range(ROWS):
+        row = state[r]
+        for c in range(COLS):
+            owner, orb_count = row[c]
+            if owner is not None and orb_count > 0:
+                owners[idx] = owner
+                counts[idx] = int(orb_count)
+                total_orbs += int(orb_count)
+            idx += 1
+
+    return owners, counts, total_orbs
+
+
+def count_cells(owners, counts):
     cells_0 = 0
     cells_1 = 0
-    for row in range(ROWS):
-        for col in range(COLS):
-            if count_grid[row][col] > 0:
-                if owner_grid[row][col] == 0:
-                    cells_0 += 1
-                elif owner_grid[row][col] == 1:
-                    cells_1 += 1
+    for idx in range(N_CELLS):
+        if counts[idx] == 0:
+            continue
+        if owners[idx] == 0:
+            cells_0 += 1
+        elif owners[idx] == 1:
+            cells_1 += 1
     return cells_0, cells_1
 
 
-def simulate(owner_grid, count_grid, player_id, move):
-    new_owner = owner_grid.copy()
-    new_count = count_grid.copy()
+def valid_moves(owners, counts, player_id):
+    moves = []
+    for idx in range(N_CELLS):
+        if counts[idx] == 0 or owners[idx] == player_id:
+            moves.append(idx)
+    return moves
 
-    row, col = move
-    new_owner[row][col] = player_id
-    new_count[row][col] += 1
+
+def simulate(owners, counts, player_id, move_idx):
+    new_owners = owners[:]
+    new_counts = counts[:]
+
+    new_owners[move_idx] = player_id
+    new_counts[move_idx] += 1
 
     queue = deque()
-    if new_count[row][col] >= CAPACITY[row][col]:
-        queue.append((row, col))
+    if new_counts[move_idx] >= CAPACITY[move_idx]:
+        queue.append(move_idx)
 
-    iterations = 0
-    max_iterations = 500
-
-    while queue and iterations < max_iterations:
-        iterations += 1
-        curr_row, curr_col = queue.popleft()
-        current_count = new_count[curr_row][curr_col]
-        cap = CAPACITY[curr_row][curr_col]
-
-        if current_count < cap:
+    while queue:
+        cell = queue.popleft()
+        cap = CAPACITY[cell]
+        if new_counts[cell] < cap:
             continue
 
-        exploding_owner = new_owner[curr_row][curr_col]
+        exploding_owner = new_owners[cell]
+        new_counts[cell] -= cap
 
-        cells_0, cells_1 = count_cells_per_player(new_owner, new_count)
-        if cells_0 > 0 and cells_1 > 0:
-            pass
-        elif cells_0 == 0 and cells_1 > 0:
-            return new_owner, new_count, 1
-        elif cells_1 == 0 and cells_0 > 0:
-            return new_owner, new_count, 0
-
-        remaining = current_count - cap
-        if remaining > 0:
-            new_count[curr_row][curr_col] = remaining
-            new_owner[curr_row][curr_col] = exploding_owner
-            if remaining >= cap:
-                queue.append((curr_row, curr_col))
+        if new_counts[cell] == 0:
+            new_owners[cell] = -1
         else:
-            new_count[curr_row][curr_col] = 0
-            new_owner[curr_row][curr_col] = -1
+            new_owners[cell] = exploding_owner
+            if new_counts[cell] >= cap:
+                queue.append(cell)
 
-        for nbr_row, nbr_col in NEIGHBORS[curr_row][curr_col]:
-            new_owner[nbr_row][nbr_col] = exploding_owner
-            new_count[nbr_row][nbr_col] += 1
-            if new_count[nbr_row][nbr_col] >= CAPACITY[nbr_row][nbr_col]:
-                queue.append((nbr_row, nbr_col))
+        for nbr in NEIGHBORS[cell]:
+            new_owners[nbr] = exploding_owner
+            new_counts[nbr] += 1
+            if new_counts[nbr] >= CAPACITY[nbr]:
+                queue.append(nbr)
 
-    winner = None
-    cells_0, cells_1 = count_cells_per_player(new_owner, new_count)
-    if cells_0 == 0 and cells_1 > 0:
-        winner = 1
-    elif cells_1 == 0 and cells_0 > 0:
-        winner = 0
-
-    return new_owner, new_count, winner
+    return new_owners, new_counts
 
 
-def evaluate(owner_grid, count_grid, player_id, moves_played_0, moves_played_1):
-    opponent = 1 - player_id
+def evaluate(owners, counts, root_player, total_orbs):
+    opp = 1 - root_player
 
     my_cells = 0
     opp_cells = 0
     my_orbs = 0
     opp_orbs = 0
-    my_critical = 0
-    opp_critical = 0
-    my_corner_edge = 0.0
-    opp_corner_edge = 0.0
-    explosion_risk = 0
+    my_pressure = 0
+    opp_pressure = 0
+    my_positional = 0.0
+    opp_positional = 0.0
 
-    for row in range(ROWS):
-        for col in range(COLS):
-            orbs = count_grid[row][col]
-            if orbs == 0:
-                continue
-            owner = owner_grid[row][col]
-            cap = CAPACITY[row][col]
+    my_critical = []
+    opp_critical = []
 
-            if owner == player_id:
-                my_cells += 1
-                my_orbs += orbs
-                if orbs == cap - 1:
-                    my_critical += 1
-                my_corner_edge += CORNER_EDGE_BONUS[row][col]
-            elif owner == opponent:
-                opp_cells += 1
-                opp_orbs += orbs
-                if orbs == cap - 1:
-                    opp_critical += 1
-                    for nbr_row, nbr_col in NEIGHBORS[row][col]:
-                        if count_grid[nbr_row][nbr_col] > 0 and owner_grid[nbr_row][nbr_col] == player_id:
-                            explosion_risk += 1
-                opp_corner_edge += CORNER_EDGE_BONUS[row][col]
+    for idx in range(N_CELLS):
+        orb_count = counts[idx]
+        if orb_count == 0:
+            continue
 
-    both_moved = moves_played_0 > 0 and moves_played_1 > 0
-    if both_moved:
-        if my_cells == 0:
-            return -INF
-        if opp_cells == 0:
-            return INF
+        owner = owners[idx]
+        cap = CAPACITY[idx]
+        is_critical = orb_count == (cap - 1)
 
-    cell_diff = my_cells - opp_cells
-    orb_diff = my_orbs - opp_orbs
-    critical_score = my_critical * 3.0 - opp_critical * 3.0
-    corner_edge_score = my_corner_edge - opp_corner_edge
-    risk_penalty = -explosion_risk * 2.0
+        if owner == root_player:
+            my_cells += 1
+            my_orbs += orb_count
+            my_positional += POSITION_WEIGHT[idx]
+            if is_critical:
+                my_pressure += 1
+                my_critical.append(idx)
+        elif owner == opp:
+            opp_cells += 1
+            opp_orbs += orb_count
+            opp_positional += POSITION_WEIGHT[idx]
+            if is_critical:
+                opp_pressure += 1
+                opp_critical.append(idx)
 
-    score = (
-        cell_diff * 5.0
-        + orb_diff * 1.0
-        + critical_score
-        + corner_edge_score
-        + risk_penalty
-    )
+    if total_orbs >= 2:
+        if opp_cells == 0 and my_cells > 0:
+            return WIN_SCORE
+        if my_cells == 0 and opp_cells > 0:
+            return -WIN_SCORE
+
+    my_vulnerability = 0
+    for idx in my_critical:
+        for nbr in NEIGHBORS[idx]:
+            if owners[nbr] == opp and counts[nbr] >= CAPACITY[nbr] - 1:
+                my_vulnerability += 1
+                break
+
+    opp_vulnerability = 0
+    for idx in opp_critical:
+        for nbr in NEIGHBORS[idx]:
+            if owners[nbr] == root_player and counts[nbr] >= CAPACITY[nbr] - 1:
+                opp_vulnerability += 1
+                break
+
+    my_moves = 0
+    opp_moves = 0
+    for idx in range(N_CELLS):
+        if counts[idx] == 0:
+            my_moves += 1
+            opp_moves += 1
+        elif owners[idx] == root_player:
+            my_moves += 1
+        elif owners[idx] == opp:
+            opp_moves += 1
+
+    score = 0.0
+    score += (my_cells - opp_cells) * 14.0
+    score += (my_orbs - opp_orbs) * 2.6
+    score += (my_pressure - opp_pressure) * 5.0
+    score += (my_positional - opp_positional) * 2.2
+    score += (opp_vulnerability - my_vulnerability) * 7.5
+    score += (my_moves - opp_moves) * 0.35
 
     return score
 
 
-def get_valid_moves(owner_grid, count_grid, player_id):
-    moves = []
-    for row in range(ROWS):
-        for col in range(COLS):
-            if count_grid[row][col] == 0 or owner_grid[row][col] == player_id:
-                moves.append((row, col))
-    return moves
+def move_priority(owners, counts, player_id, move_idx):
+    opp = 1 - player_id
+    cap = CAPACITY[move_idx]
+    current = counts[move_idx]
+    owner = owners[move_idx]
 
+    score = POSITION_WEIGHT[move_idx] * 2.0
 
-def order_moves(owner_grid, count_grid, player_id, moves):
-    opponent = 1 - player_id
-    priority_0_instant_win = []
-    priority_1_explode_opponent = []
-    priority_2_near_critical = []
-    priority_3_other = []
-
-    for move in moves:
-        row, col = move
-        orbs = count_grid[row][col]
-        cap = CAPACITY[row][col]
-        owner = owner_grid[row][col]
-
-        will_explode = (orbs + 1) >= cap
-
-        if will_explode:
-            has_opponent_neighbor = False
-            triggers_opponent_critical = False
-            for nbr_row, nbr_col in NEIGHBORS[row][col]:
-                if owner_grid[nbr_row][nbr_col] == opponent and count_grid[nbr_row][nbr_col] > 0:
-                    has_opponent_neighbor = True
-                    break
-
-            if has_opponent_neighbor:
-                priority_1_explode_opponent.append(move)
+    if current + 1 >= cap:
+        score += 20.0
+        for nbr in NEIGHBORS[move_idx]:
+            if counts[nbr] == 0:
                 continue
+            if owners[nbr] == opp:
+                score += 9.0
+                if counts[nbr] >= CAPACITY[nbr] - 1:
+                    score += 8.0
+            elif owners[nbr] == player_id and counts[nbr] >= CAPACITY[nbr] - 1:
+                score += 2.5
+    else:
+        if owner == player_id and current == cap - 1:
+            score += 8.0
 
-        if owner == player_id and orbs == cap - 1:
-            priority_2_near_critical.append(move)
-            continue
+    for nbr in NEIGHBORS[move_idx]:
+        if owners[nbr] == opp and counts[nbr] >= CAPACITY[nbr] - 1:
+            score -= 4.0
 
-        priority_3_other.append(move)
-
-    return priority_1_explode_opponent + priority_2_near_critical + priority_3_other
+    return score
 
 
-def alpha_beta(owner_grid, count_grid, player_id, depth, alpha, beta,
-               maximizing, deadline, moves_played_0, moves_played_1):
-    if time.time() >= deadline:
-        return evaluate(owner_grid, count_grid, player_id, moves_played_0, moves_played_1), None
+def order_moves(owners, counts, player_id, moves):
+    scored = []
+    for move in moves:
+        scored.append((move_priority(owners, counts, player_id, move), move))
+    scored.sort(reverse=True)
+    return [move for _score, move in scored]
 
-    current_player = player_id if maximizing else (1 - player_id)
-    valid_moves = get_valid_moves(owner_grid, count_grid, current_player)
 
-    if not valid_moves:
-        return evaluate(owner_grid, count_grid, player_id, moves_played_0, moves_played_1), None
+def terminal_score_if_any(owners, counts, root_player, total_orbs):
+    if total_orbs < 2:
+        return None
+
+    cells_0, cells_1 = count_cells(owners, counts)
+    if cells_0 > 0 and cells_1 > 0:
+        return None
+
+    if root_player == 0:
+        if cells_1 == 0 and cells_0 > 0:
+            return WIN_SCORE
+        if cells_0 == 0 and cells_1 > 0:
+            return -WIN_SCORE
+    else:
+        if cells_0 == 0 and cells_1 > 0:
+            return WIN_SCORE
+        if cells_1 == 0 and cells_0 > 0:
+            return -WIN_SCORE
+
+    return None
+
+
+def negamax(owners, counts, current_player, root_player, depth, alpha, beta, deadline, total_orbs):
+    if time.perf_counter() >= deadline:
+        return evaluate(owners, counts, root_player, total_orbs), None, True
+
+    terminal_score = terminal_score_if_any(owners, counts, root_player, total_orbs)
+    if terminal_score is not None:
+        return terminal_score, None, False
 
     if depth == 0:
-        return evaluate(owner_grid, count_grid, player_id, moves_played_0, moves_played_1), None
+        return evaluate(owners, counts, root_player, total_orbs), None, False
 
-    ordered_moves = order_moves(owner_grid, count_grid, current_player, valid_moves)
+    moves = valid_moves(owners, counts, current_player)
+    if not moves:
+        # No legal move means this branch is effectively lost after opening turns.
+        if total_orbs >= 2:
+            if current_player == root_player:
+                return -WIN_SCORE + 1.0, None, False
+            return WIN_SCORE - 1.0, None, False
+        return evaluate(owners, counts, root_player, total_orbs), None, False
+
+    ordered_moves = order_moves(owners, counts, current_player, moves)
 
     best_move = ordered_moves[0]
+    best_score = -WIN_SCORE * 10.0
 
-    if maximizing:
-        max_eval = -INF - 1
-        for move in ordered_moves:
-            if time.time() >= deadline:
-                break
+    for move in ordered_moves:
+        if time.perf_counter() >= deadline:
+            if best_score <= -WIN_SCORE * 9.0:
+                return evaluate(owners, counts, root_player, total_orbs), best_move, True
+            return best_score, best_move, True
 
-            new_owner, new_count, winner = simulate(owner_grid, count_grid, current_player, move)
+        child_owners, child_counts = simulate(owners, counts, current_player, move)
+        child_score, _child_move, timed_out = negamax(
+            child_owners,
+            child_counts,
+            1 - current_player,
+            root_player,
+            depth - 1,
+            -beta,
+            -alpha,
+            deadline,
+            total_orbs + 1,
+        )
 
-            new_mp0 = moves_played_0 + (1 if current_player == 0 else 0)
-            new_mp1 = moves_played_1 + (1 if current_player == 1 else 0)
+        if timed_out:
+            if best_score <= -WIN_SCORE * 9.0:
+                return evaluate(owners, counts, root_player, total_orbs), best_move, True
+            return best_score, best_move, True
 
-            if winner is not None:
-                if winner == player_id:
-                    return INF, move
-                else:
-                    continue
+        score = -child_score
+        if score > best_score:
+            best_score = score
+            best_move = move
 
-            eval_score, _ = alpha_beta(
-                new_owner, new_count, player_id, depth - 1,
-                alpha, beta, False, deadline, new_mp0, new_mp1
-            )
+        if score > alpha:
+            alpha = score
 
-            if eval_score > max_eval:
-                max_eval = eval_score
-                best_move = move
-
-            alpha = max(alpha, eval_score)
-            if beta <= alpha:
-                break
-
-        return max_eval, best_move
-    else:
-        min_eval = INF + 1
-        for move in ordered_moves:
-            if time.time() >= deadline:
-                break
-
-            new_owner, new_count, winner = simulate(owner_grid, count_grid, current_player, move)
-
-            new_mp0 = moves_played_0 + (1 if current_player == 0 else 0)
-            new_mp1 = moves_played_1 + (1 if current_player == 1 else 0)
-
-            if winner is not None:
-                if winner == player_id:
-                    continue
-                else:
-                    return -INF, move
-
-            eval_score, _ = alpha_beta(
-                new_owner, new_count, player_id, depth - 1,
-                alpha, beta, True, deadline, new_mp0, new_mp1
-            )
-
-            if eval_score < min_eval:
-                min_eval = eval_score
-                best_move = move
-
-            beta = min(beta, eval_score)
-            if beta <= alpha:
-                break
-
-        return min_eval, best_move
-
-
-def iterative_deepening(owner_grid, count_grid, player_id, deadline, moves_played_0, moves_played_1):
-    valid_moves = get_valid_moves(owner_grid, count_grid, player_id)
-
-    if not valid_moves:
-        return (0, 0)
-
-    if len(valid_moves) == 1:
-        return valid_moves[0]
-
-    ordered = order_moves(owner_grid, count_grid, player_id, valid_moves)
-    best_move = ordered[0]
-
-    for depth in range(1, MAX_SEARCH_DEPTH + 1):
-        if time.time() >= deadline:
+        if alpha >= beta:
             break
 
-        eval_score, move = alpha_beta(
-            owner_grid, count_grid, player_id, depth,
-            -INF - 1, INF + 1, True, deadline,
-            moves_played_0, moves_played_1
+    return best_score, best_move, False
+
+
+def choose_move(owners, counts, player_id, total_orbs, deadline):
+    moves = valid_moves(owners, counts, player_id)
+    if not moves:
+        return 0
+    if len(moves) == 1:
+        return moves[0]
+
+    ordered = order_moves(owners, counts, player_id, moves)
+    best_move = ordered[0]
+
+    # Quick tactical finish detection before deep search.
+    if total_orbs + 1 >= 2:
+        for move in ordered:
+            child_owners, child_counts = simulate(owners, counts, player_id, move)
+            cells_0, cells_1 = count_cells(child_owners, child_counts)
+            if player_id == 0 and cells_1 == 0 and cells_0 > 0:
+                return move
+            if player_id == 1 and cells_0 == 0 and cells_1 > 0:
+                return move
+
+    depth = 1
+    while depth <= MAX_DEPTH and time.perf_counter() < deadline:
+        score, move, timed_out = negamax(
+            owners,
+            counts,
+            player_id,
+            player_id,
+            depth,
+            -WIN_SCORE * 10.0,
+            WIN_SCORE * 10.0,
+            deadline,
+            total_orbs,
         )
+
+        if timed_out:
+            break
 
         if move is not None:
             best_move = move
 
-        if eval_score >= INF:
+        if score >= WIN_SCORE - 1.0:
             break
 
-        if time.time() >= deadline:
-            break
+        depth += 1
 
     return best_move
 
 
-def estimate_moves_played(owner_grid, count_grid):
-    total_orbs = 0
-    for row in range(ROWS):
-        for col in range(COLS):
-            total_orbs += int(count_grid[row][col])
+def compute_time_budget(total_orbs, legal_move_count):
+    if total_orbs < 8:
+        budget = 0.08
+    elif total_orbs < 40:
+        budget = 0.14
+    else:
+        budget = BASE_TIME_LIMIT
 
-    has_p0 = False
-    has_p1 = False
-    for row in range(ROWS):
-        for col in range(COLS):
-            if count_grid[row][col] > 0:
-                if owner_grid[row][col] == 0:
-                    has_p0 = True
-                elif owner_grid[row][col] == 1:
-                    has_p1 = True
+    if legal_move_count > 50:
+        budget -= 0.03
+    elif legal_move_count < 20:
+        budget += 0.03
 
-    mp0 = max(1, total_orbs // 2) if has_p0 else 0
-    mp1 = max(1, total_orbs // 2) if has_p1 else 0
-
-    if total_orbs <= 1:
-        if has_p0 and not has_p1:
-            mp0 = 1
-            mp1 = 0
-        elif has_p1 and not has_p0:
-            mp0 = 0
-            mp1 = 1
-        elif not has_p0 and not has_p1:
-            mp0 = 0
-            mp1 = 0
-
-    return mp0, mp1
+    if budget < 0.05:
+        return 0.05
+    if budget > 0.24:
+        return 0.24
+    return budget
 
 
 def get_move(state, player_id):
-    start_time = time.time()
-    deadline = start_time + TIME_LIMIT
+    owners, counts, total_orbs = state_to_arrays(state)
 
-    owner_grid, count_grid = state_to_grids(state)
-    moves_played_0, moves_played_1 = estimate_moves_played(owner_grid, count_grid)
+    legal = valid_moves(owners, counts, player_id)
+    if not legal:
+        return (0, 0)
 
-    best_move = iterative_deepening(
-        owner_grid, count_grid, player_id, deadline,
-        moves_played_0, moves_played_1
-    )
+    # Opening corner preference gives stable early control at near-zero cost.
+    if total_orbs == 0:
+        return (ROWS - 1, COLS - 1)
 
-    return best_move
+    budget = compute_time_budget(total_orbs, len(legal))
+    deadline = time.perf_counter() + budget
+
+    best_idx = choose_move(owners, counts, player_id, total_orbs, deadline)
+    return idx_to_move(best_idx)
 
 
 if __name__ == "__main__":
-    test_state = [[(None, 0) for _ in range(COLS)] for _ in range(ROWS)]
-    move = get_move(test_state, 0)
-    print(f"Bot returned move: {move}")
+    empty_state = [[(None, 0) for _ in range(COLS)] for _ in range(ROWS)]
+    print(get_move(empty_state, 0))
